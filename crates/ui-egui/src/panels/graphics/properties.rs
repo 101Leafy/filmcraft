@@ -744,6 +744,20 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             cx.check(&mut vui, "kerning", tl!("Kerning"));
             cx.check(&mut vui, "ligatures", tl!("Ligatures"));
         }
+        if e.effect == graphic::IMAGE_LAYER && section(ui, app, "Image", &t) {
+            let (_, mut vui) = cx.row(ui, tl!("Source"));
+            let mut src = match cx.value("source") {
+                ParamValue::Text(s) => s,
+                _ => String::new(),
+            };
+            let before = src.clone();
+            let r = vui.add(egui::TextEdit::singleline(&mut src).desired_width(vui.available_width() - 4.0));
+            cx.auto("source", r.rect, tl!("Source"));
+            if r.lost_focus() && src != before {
+                cx.set("source", json!(src));
+            }
+            cx.point(ui, tl!("Size"), "size");
+        }
         if e.effect == graphic::SHAPE_LAYER && section(ui, app, "Shape", &t) {
             let (_, mut vui) = cx.row(ui, tl!("Shape"));
             cx.choice(&mut vui, "shape", tl!("Shape"), graphic::SHAPE_OPTS, 120.0);

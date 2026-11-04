@@ -388,7 +388,7 @@ pub fn template_controls(
                     set(json!(b), actions);
                 }
             }
-            ControlKind::Text => {
+            ControlKind::Text | ControlKind::Image => {
                 let mut s = match pv {
                     Some(ParamValue::Text(s)) => s,
                     _ => String::new(),

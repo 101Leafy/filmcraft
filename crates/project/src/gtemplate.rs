@@ -13,10 +13,13 @@
 //!   "description": "", "author": "", "license": "", "tags": [],
 //!   "canvas": [1920, 1080],
 //!   "duration": 1270080000000,
-//!   "layers": [ /* graphic_text / graphic_shape effect instances, as in a project file */ ],
+//!   "layers": [ /* graphic_text / graphic_shape / graphic_image effect instances, as in a project file */ ],
 //!   "graphic": { /* roll, intro / outro (GraphicMeta) */ },
 //!   "controls": [ { "id": "name", "name": "Name", "kind": "text", "layer": 1, "param": "text" } ],
-//!   "resources": { "fonts": [ { "family": "…", "style": "…", "license": "OFL-1.1", "data": "<base64>" } ] }
+//!   "resources": {
+//!     "fonts": [ { "family": "…", "style": "…", "license": "OFL-1.1", "data": "<base64>" } ],
+//!     "images": [ { "id": "talk-box", "file": "talk_box.png", "data": "<base64>" } ]
+//!   }
 //! }
 //! ```
 //!
@@ -24,10 +27,13 @@
 //! - Layers are referenced by their [`LayerExtra::uid`](crate::graphic_design::LayerExtra); every
 //!   layer of a template has one.
 //! - `controls` are the properties a user of the template edits (Essential Graphics ▸ Edit):
-//!   text, colour, slider (with `min` / `max`), checkbox, font and position, each bound to one
-//!   layer parameter (`enabled` = the layer's visibility).
+//!   text, colour, slider (with `min` / `max`), checkbox, font, position and image, each bound to
+//!   one layer parameter (`enabled` = the layer's visibility; an image control edits an image
+//!   layer's `source`).
 //! - `resources.fonts` optionally embeds font files (base64) that the template needs; installing
 //!   the template registers them. Only embed fonts whose licence allows redistribution.
+//! - `resources.images` embeds pictures (base64 PNG, JPEG, …) for image layers. An image layer
+//!   whose `source` is `embedded:<id>` shows the picture with that id.
 //!
 //! FilmCraft never reads Adobe `.mogrt` files (or any other application's template format);
 //! [`GraphicsTemplate::from_bytes`] rejects ZIP archives with a message saying so.
@@ -61,11 +67,12 @@ pub enum ControlKind {
     Checkbox,
     Font,
     Position,
+    Image,
 }
 
 impl ControlKind {
-    pub const ALL: [ControlKind; 6] =
-        [ControlKind::Text, ControlKind::Color, ControlKind::Slider, ControlKind::Checkbox, ControlKind::Font, ControlKind::Position];
+    pub const ALL: [ControlKind; 7] =
+        [ControlKind::Text, ControlKind::Color, ControlKind::Slider, ControlKind::Checkbox, ControlKind::Font, ControlKind::Position, ControlKind::Image];
     pub fn name(self) -> &'static str {
         match self {
             ControlKind::Text => "text",
@@ -74,6 +81,7 @@ impl ControlKind {
             ControlKind::Checkbox => "checkbox",
             ControlKind::Font => "font",
             ControlKind::Position => "position",
+            ControlKind::Image => "image",
         }
     }
     pub fn from_name(s: &str) -> Option<ControlKind> {
@@ -87,11 +95,13 @@ impl ControlKind {
             "text" | "name" => ControlKind::Text,
             "font" | "font_style" => ControlKind::Font,
             "position" | "anchor" => ControlKind::Position,
+            "source" => ControlKind::Image,
             "enabled" => ControlKind::Checkbox,
             p if p.ends_with("_color") => ControlKind::Color,
             p => match crate::find_effect(graphic::TEXT_LAYER)
                 .and_then(|d| d.param(p))
                 .or_else(|| crate::find_effect(graphic::SHAPE_LAYER).and_then(|d| d.param(p)))
+                .or_else(|| crate::find_effect(graphic::IMAGE_LAYER).and_then(|d| d.param(p)))
             {
                 Some(d) => match &d.default {
                     ParamValue::Bool(_) => ControlKind::Checkbox,
@@ -148,16 +158,30 @@ pub struct FontResource {
     pub data: String,
 }
 
+/// A picture embedded in a template, shown by image layers whose source is `embedded:<id>`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageResource {
+    /// Unique in the template.
+    pub id: String,
+    /// Original file name; its extension tells the picture's format.
+    pub file: String,
+    /// The picture file, base64.
+    pub data: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Resources {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<FontResource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageResource>,
 }
 
 impl Resources {
     pub fn is_empty(&self) -> bool {
-        self.fonts.is_empty()
+        self.fonts.is_empty() && self.images.is_empty()
     }
 }
 
@@ -305,6 +329,23 @@ impl GraphicsTemplate {
         for f in &self.resources.fonts {
             if base64_decode(&f.data).is_none() {
                 return bad(format!("font `{}` is not valid base64", f.family));
+            }
+        }
+        let mut images = HashSet::with_capacity(self.resources.images.len());
+        for im in &self.resources.images {
+            if im.id.is_empty() || !images.insert(im.id.as_str()) {
+                return bad(format!("image `{}` has no unique id", im.file));
+            }
+            if base64_decode(&im.data).is_none() {
+                return bad(format!("image `{}` is not valid base64", im.id));
+            }
+        }
+        for (i, l) in self.layers.iter().enumerate() {
+            if let Some(ParamValue::Text(src)) = l.params.get("source").map(|p| &p.value)
+                && let Some(id) = src.strip_prefix(graphic::EMBEDDED_PREFIX)
+                && !images.contains(id)
+            {
+                return bad(format!("layer {i} shows embedded image `{id}`, which the template does not carry"));
             }
         }
         Ok(())
@@ -719,6 +760,24 @@ mod tests {
         assert_eq!(base64_encode(b"Man"), "TWFu");
         assert_eq!(base64_encode(b"Ma"), "TWE=");
         assert!(base64_decode("@@@").is_none());
+    }
+
+    #[test]
+    fn embedded_images_must_exist_and_be_unique() {
+        let mut t = builtin_templates().remove(0);
+        t.layers.push(graphic::new_image_layer("embedded:box", Vec2::new(0.0, 0.0)));
+        ensure_uids(&mut t.layers);
+        assert!(t.validate().is_err(), "a layer shows a picture the template does not carry");
+        let im = ImageResource { id: "box".into(), file: "box.png".into(), data: base64_encode(b"not checked here") };
+        t.resources.images.push(im.clone());
+        t.validate().unwrap();
+        t.resources.images.push(im);
+        assert!(t.validate().is_err(), "two pictures share an id");
+        t.resources.images.truncate(1);
+        t.resources.images[0].data = "@@@".into();
+        assert!(t.validate().is_err());
+        let back = GraphicsTemplate::from_bytes(t.to_json().as_bytes());
+        assert!(back.is_err());
     }
 
     #[test]

@@ -445,6 +445,11 @@ fn list_layers(s: &Session, clip: ClipId) -> Result<Value> {
             let (kind, text) = match &sp.content {
                 LayerContent::Text(t) => ("text", Some(t.text.clone())),
                 LayerContent::Shape(sh) => (SHAPE_OPTS.get(sh.shape as usize).copied().unwrap_or("Shape"), None),
+                LayerContent::Image(_) => ("image", None),
+            };
+            let source = match &sp.content {
+                LayerContent::Image(im) => Some(im.source.clone()),
+                _ => None,
             };
             // point text has no box; paragraph text wraps in one and hides what does not fit
             let (text_type, text_box, overflow) = match &sp.content {
@@ -452,7 +457,7 @@ fn list_layers(s: &Session, clip: ClipId) -> Result<Value> {
                     (Some("paragraph"), Some([t.box_width, t.box_height]), Some(text_layout(t).overflow))
                 }
                 LayerContent::Text(_) => (Some("point"), None, None),
-                LayerContent::Shape(_) => (None, None, None),
+                LayerContent::Shape(_) | LayerContent::Image(_) => (None, None, None),
             };
             Some(json!({
                 "layer": i,
@@ -460,6 +465,7 @@ fn list_layers(s: &Session, clip: ClipId) -> Result<Value> {
                 "name": layer_display_name(e, i),
                 "kind": kind,
                 "text": text,
+                "source": source,
                 "enabled": e.enabled,
                 "textType": text_type,
                 "box": text_box,
@@ -1101,6 +1107,33 @@ pub fn commands() -> Vec<CommandSpec> {
                 let (clip, layer_i) = match into {
                     Some(c) => (c, add_layer(s, c, layer)?),
                     None => (new_graphic_clip(s, "graphics.newShape", layer, "Shape", p)?, 0),
+                };
+                Ok(json!({"clip": clip.0, "layer": layer_i}))
+            },
+        ),
+        spec(
+            "graphics.newImage",
+            "Image",
+            &[],
+            None,
+            r#"{"path":str (a picture file: PNG, JPEG, …),"position":[x,y]? (the picture's centre),"size":[w,h]? (default: the picture's own size; 0 on one side keeps the aspect),"clip":id? (add the picture to this graphic),"seconds":f64=5,"track":index?,"time":ticks?}"#,
+            has_seq,
+            |s, p| {
+                let path = str_p(p, "path").filter(|x| !x.trim().is_empty()).ok_or_else(|| bad("graphics.newImage", "need `path`"))?.to_string();
+                if filmcraft_render::graphic_image::picture(&path).is_none() {
+                    return Err(bad("graphics.newImage", format!("{path}: not a picture FilmCraft can read")));
+                }
+                let (w, h) = s.active_sequence().map(|q| (q.settings.width, q.settings.height)).unwrap_or((1920, 1080));
+                let pos = vec2_p(p, "position").unwrap_or(Vec2::new(w as f64 / 2.0, h as f64 / 2.0));
+                let mut layer = graphic::new_image_layer(&path, pos);
+                if let Some(sz) = vec2_p(p, "size") {
+                    layer.params.insert("size".into(), Param::new(ParamValue::Vec2(Vec2::new(sz.x.clamp(0.0, 100_000.0), sz.y.clamp(0.0, 100_000.0)))));
+                }
+                let name = std::path::Path::new(&path).file_stem().and_then(|x| x.to_str()).unwrap_or("Image").to_string();
+                let into = u64_p(p, "clip").map(ClipId).filter(|c| s.active_sequence().is_some_and(|q| is_graphic(s, q, *c)));
+                let (clip, layer_i) = match into {
+                    Some(c) => (c, add_layer(s, c, layer)?),
+                    None => (new_graphic_clip(s, "graphics.newImage", layer, &name, p)?, 0),
                 };
                 Ok(json!({"clip": clip.0, "layer": layer_i}))
             },

@@ -14,18 +14,19 @@
 //!   every clip of a project item; editing one instance updates the others) and **Replace Fonts
 //!   in Projects**.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use filmcraft_geom::{Affine, Vec2};
 use filmcraft_project::graphic::{self, layer_display_name, layer_indices};
 use filmcraft_project::graphic_design::{CharStyle, GraphicMeta, LayerExtra, Pin, PinTarget, RollMode, SourceGraphic, apply_char_style, clear_char_style};
 use filmcraft_project::gtemplate::{
-    self, ControlKind, FontResource, GraphicsTemplate, TEMPLATE_EXTENSION, TemplateControl, base64_decode, base64_encode, builtin_templates, ensure_uids,
-    layer_uid,
+    self, ControlKind, FontResource, GraphicsTemplate, ImageResource, TEMPLATE_EXTENSION, TemplateControl, base64_decode, base64_encode, builtin_templates,
+    ensure_uids, layer_uid,
 };
 use filmcraft_project::{ClipId, EffectInstance, ItemId, ItemKind, Label, ParamValue, Project, TrackItem};
 use filmcraft_render::graphic_clip::{item_layer_specs, layer_bounds};
+use filmcraft_render::graphic_image::{is_registered, register_image_data};
 use filmcraft_time::Tick;
 use serde_json::{Value, json};
 
@@ -117,19 +118,74 @@ pub fn find_template(s: &Session, key: &str) -> Result<LibraryEntry> {
         .ok_or_else(|| bad("graphics.template", format!("no graphics template `{key}`")))
 }
 
+fn fnv(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
 /// Register the fonts a template embeds (once per font file).
 fn register_fonts(t: &GraphicsTemplate) -> usize {
     static SEEN: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
     let mut n = 0;
     for f in &t.resources.fonts {
         let Some(data) = base64_decode(&f.data) else { continue };
-        let h = data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100_0000_01b3));
+        let h = fnv(&data);
         let mut seen = SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
         if seen.insert(h) {
             n += filmcraft_text::fonts::add_font_data(data).len();
         }
     }
     n
+}
+
+/// Picture files kept in memory under `embedded:<hash>` sources, so a graphic made from a
+/// template can be exported again without its template.
+fn embedded_store() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
+    static S: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Decode the pictures a template embeds and return, per image id, the source its layers use
+/// instead of `embedded:<id>`. With `dir` each picture is also saved there (once per file
+/// content) and the source is that file, so placed graphics keep their pictures in a saved
+/// project; otherwise the picture is kept in memory.
+fn image_sources(s: Option<&Session>, t: &GraphicsTemplate, dir: Option<&std::path::Path>) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    for im in &t.resources.images {
+        let Some(data) = base64_decode(&im.data) else { continue };
+        let h = fnv(&data);
+        let ext = std::path::Path::new(&im.file).extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+        if let (Some(s), Some(dir)) = (s, dir) {
+            let _ = std::fs::create_dir_all(dir);
+            let path = dir.join(format!("{h:016x}.{ext}")).to_string_lossy().to_string();
+            if s.services.read_file(&path).is_ok_and(|b| b == data) || s.services.write_file(&path, &data).is_ok() {
+                m.insert(im.id.clone(), path);
+                continue;
+            }
+        }
+        let key = format!("{}{h:016x}.{ext}", graphic::EMBEDDED_PREFIX);
+        if is_registered(&key) || register_image_data(&key, &data) {
+            embedded_store().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), Arc::new(data));
+            m.insert(im.id.clone(), key);
+        }
+    }
+    m
+}
+
+/// Point image layers that use `embedded:<id>` at `sources[id]`.
+fn relink_images(layers: &mut [EffectInstance], sources: &HashMap<String, String>) {
+    for l in layers.iter_mut().filter(|l| l.effect == graphic::IMAGE_LAYER) {
+        if let Some(prm) = l.params.get_mut("source")
+            && let ParamValue::Text(src) = &prm.value
+            && let Some(to) = src.strip_prefix(graphic::EMBEDDED_PREFIX).and_then(|id| sources.get(id))
+        {
+            prm.value = ParamValue::Text(to.clone());
+        }
+    }
+}
+
+/// Where applied templates' pictures are saved.
+fn template_images_dir(s: &Session) -> Option<std::path::PathBuf> {
+    user_templates_dir(s).map(|d| d.join("Images"))
 }
 
 fn control_json(c: &TemplateControl) -> Value {
@@ -166,7 +222,9 @@ pub fn thumbnail(t: &GraphicsTemplate, w: u32) -> (u32, u32, Vec<u8>) {
     ) else {
         return (w, h, vec![0; w as usize * h as usize * 4]);
     };
-    it.effects.extend(t.layers.iter().cloned());
+    let mut layers = t.layers.clone();
+    relink_images(&mut layers, &image_sources(None, t, None));
+    it.effects.extend(layers);
     it.graphic = Some(Box::new(meta));
     // a moment into the clip, so intro animations have settled a little
     let at = Tick((t.duration.0 / 2).min(filmcraft_time::TICKS_PER_SECOND));
@@ -327,7 +385,11 @@ fn apply_template(s: &mut Session, p: &Value) -> Result<Value> {
     let t = entry.template;
     register_fonts(&t);
     let (w, h) = s.active_sequence().map(|q| (q.settings.width, q.settings.height)).ok_or(EngineError::NoSequence)?;
-    let (layers, meta) = t.instantiate((w, h));
+    let (mut layers, meta) = t.instantiate((w, h));
+    if !t.resources.images.is_empty() {
+        let dir = template_images_dir(s);
+        relink_images(&mut layers, &image_sources(Some(s), &t, dir.as_deref()));
+    }
     let before = s.history.undo.len();
     let dur = t.duration;
     let clip = place_video_clip(s, "graphics.template.apply", &t.name, p, "Apply Graphics Template", layers, move |pr, (w, h, rate)| {
@@ -496,6 +558,40 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
+    let mut images: Vec<ImageResource> = Vec::new();
+    if bool_p(p, "embedImages").unwrap_or(true) {
+        let mut by_source: HashMap<String, String> = HashMap::new();
+        for l in layers.iter_mut().filter(|l| l.effect == graphic::IMAGE_LAYER) {
+            let Some(prm) = l.params.get_mut("source") else { continue };
+            let ParamValue::Text(src) = &prm.value else { continue };
+            if src.is_empty() {
+                continue;
+            }
+            let id = match by_source.get(src) {
+                Some(id) => id.clone(),
+                None => {
+                    let kept = embedded_store().lock().unwrap_or_else(|e| e.into_inner()).get(src.as_str()).cloned();
+                    let data = match kept {
+                        Some(d) => d.as_ref().clone(),
+                        None => s.services.read_file(src).map_err(|e| bad("graphics.template.export", format!("image layer source {src}: {e}")))?,
+                    };
+                    let file = src.strip_prefix(graphic::EMBEDDED_PREFIX).unwrap_or(src).rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                    let stem = std::path::Path::new(&file).file_stem().and_then(|x| x.to_str()).unwrap_or_default();
+                    let base = gtemplate::slug(stem);
+                    let mut id = base.clone();
+                    let mut k = 2;
+                    while images.iter().any(|i| i.id == id) {
+                        id = format!("{base}-{k}");
+                        k += 1;
+                    }
+                    images.push(ImageResource { id: id.clone(), file, data: base64_encode(&data) });
+                    by_source.insert(src.clone(), id.clone());
+                    id
+                }
+            };
+            prm.value = ParamValue::Text(format!("{}{id}", graphic::EMBEDDED_PREFIX));
+        }
+    }
     let t = GraphicsTemplate {
         id: format!("user:{}", gtemplate::slug(&name)),
         name: name.clone(),
@@ -509,7 +605,7 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
         layers,
         graphic: meta,
         controls,
-        resources: gtemplate::Resources { fonts },
+        resources: gtemplate::Resources { fonts, images },
         ..Default::default()
     };
     t.validate().map_err(|e| EngineError::Other(e.to_string()))?;
@@ -543,7 +639,9 @@ fn export_template(s: &mut Session, p: &Value) -> Result<Value> {
             s.history.undo.pop();
         }
     }
-    Ok(json!({"path": path, "id": t.id, "name": t.name, "controls": t.controls.iter().map(control_json).collect::<Vec<_>>(), "fonts": t.resources.fonts.len()}))
+    Ok(
+        json!({"path": path, "id": t.id, "name": t.name, "controls": t.controls.iter().map(control_json).collect::<Vec<_>>(), "fonts": t.resources.fonts.len(), "images": t.resources.images.len()}),
+    )
 }
 
 fn install_template(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1200,7 +1298,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "graphics.template.export",
             "Export As Motion Graphics Template…",
             G,
-            r#"{"clip":id?,"name":str,"category":str="My Templates","description":str?,"controls":[{"layer":n|name,"param":"text|fill_color|size|font|position|enabled|…","name":str?,"kind":"text|color|slider|checkbox|font|position"?,"min":f64?,"max":f64?,"id":str?}]? (default: each text layer's text),"path":str? (default: the user templates folder),"embedFonts":bool=false,"fontLicense":str?}"#,
+            r#"{"clip":id?,"name":str,"category":str="My Templates","description":str?,"controls":[{"layer":n|name,"param":"text|fill_color|size|font|position|enabled|…","name":str?,"kind":"text|color|slider|checkbox|font|position|image"?,"min":f64?,"max":f64?,"id":str?}]? (default: each text layer's text),"path":str? (default: the user templates folder),"embedFonts":bool=false,"fontLicense":str?,"embedImages":bool=true}"#,
             has_graphic,
             export_template,
         ),

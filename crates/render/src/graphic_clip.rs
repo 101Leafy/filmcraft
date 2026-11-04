@@ -1,18 +1,18 @@
-//! Graphic clips: text and shape layers drawn as vectors straight into the output (no resampling),
-//! with fill, up to two strokes (outer / centre / inner), a background box and a drop shadow.
+//! Graphic clips: text and shape layers drawn as vectors straight into the output (no resampling)
+//! and image layers sampled from a mip chain, with fill, up to two strokes (outer / centre / inner), a background box and a drop shadow.
 //! Each layer is rasterised into a tight premultiplied linear-light image that is cached while
 //! the layer and its transform stay the same.
 //!
 //! [`item_layer_specs`] evaluates a graphic clip's layers the way they are shown: keyframes read
 //! through Responsive Design – Time, per-character style runs, responsive pins resolved (pinned
-//! layers move, pinned shapes resize), and the roll / crawl offset applied to every layer.
+//! layers move, pinned shapes and images resize), and the roll / crawl offset applied to every layer.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::graphic::{LayerContent, LayerSpec, LinearGradient, ShapeProps, Stroke, StrokeStyle, TextProps, eval_layer};
+use filmcraft_project::graphic::{ImageProps, LayerContent, LayerSpec, LinearGradient, ShapeProps, Stroke, StrokeStyle, TextProps, eval_layer};
 use filmcraft_project::graphic_design::{GraphicMeta, PinNode, remap_time, resolve_pins, roll_offset};
 use filmcraft_project::{EffectInstance, TrackItem};
 use filmcraft_text::raster::{Xform, apply, fill_into, xform_scale};
@@ -20,6 +20,7 @@ use filmcraft_text::{Align, Caps, Layout, Mask, ParagraphStyle, StrokeKind, Styl
 use filmcraft_time::Tick;
 use rayon::prelude::*;
 
+use crate::graphic_image::picture;
 use crate::graphics::{premul_linear, premul_linear_lerp};
 use crate::image::Image;
 
@@ -126,7 +127,24 @@ pub fn shape_path(s: &ShapeProps) -> filmcraft_text::Path {
     }
 }
 
-/// Content bounds `[x0, y0, x1, y1]` of a layer in layer pixels (text box or shape box).
+/// Drawn size of an image layer: its size, or the picture's own size when the size is 0 (with one
+/// axis set, the other follows the picture's aspect).
+pub fn image_size(im: &ImageProps) -> (f32, f32) {
+    let (w, h) = im.size;
+    if w > 0.0 && h > 0.0 {
+        return (w, h);
+    }
+    let Some(p) = picture(&im.source) else { return (w, h) };
+    let (pw, ph) = p.size();
+    let (pw, ph) = (pw as f32, ph as f32);
+    match (w > 0.0, h > 0.0) {
+        (true, _) => (w, w * ph / pw),
+        (_, true) => (h * pw / ph, h),
+        _ => (pw, ph),
+    }
+}
+
+/// Content bounds `[x0, y0, x1, y1]` of a layer in layer pixels (text box, shape box, or picture).
 pub fn layer_local_bounds(spec: &LayerSpec) -> [f32; 4] {
     match &spec.content {
         LayerContent::Text(t) => text_layout(t).bounds,
@@ -134,6 +152,10 @@ pub fn layer_local_bounds(spec: &LayerSpec) -> [f32; 4] {
             Some(b) => [b.0, b.1, b.2, b.3],
             None => [0.0; 4],
         },
+        LayerContent::Image(im) => {
+            let (w, h) = image_size(im);
+            [-w / 2.0, -h / 2.0, w / 2.0, h / 2.0]
+        }
     }
 }
 
@@ -191,6 +213,40 @@ fn over_mask(px: &mut [f32], m: &Mask, c: [f32; 4]) {
             }
         }
     });
+}
+
+/// Over-composite premultiplied pixels `src` (same size) onto `px`.
+fn over_pixels(px: &mut [f32], src: &[f32]) {
+    px.par_chunks_mut(4096).zip(src.par_chunks(4096)).for_each(|(d, s)| {
+        for (d, s) in d.as_chunks_mut::<4>().0.iter_mut().zip(s.as_chunks::<4>().0) {
+            let k = 1.0 - s[3];
+            for i in 0..4 {
+                d[i] = s[i] + d[i] * k;
+            }
+        }
+    });
+}
+
+/// Sample a picture into a `w`×`h` device area at `origin` through `inv` (device→layer), with
+/// `lb` the picture's box in layer pixels. The coverage (alpha) goes into `cover`.
+fn sample_picture(pic: &crate::graphic_image::Picture, lb: [f32; 4], inv: &Xform, scale: f32, origin: (i32, i32), cover: &mut Mask) -> Vec<f32> {
+    let (w, h) = (cover.w, cover.h);
+    let (lw, lh) = ((lb[2] - lb[0]).max(1e-6), (lb[3] - lb[1]).max(1e-6));
+    let (pw, ph) = pic.size();
+    let footprint = (pw as f32 / lw).max(ph as f32 / lh) / scale;
+    let lvl = pic.level(footprint);
+    let (kx, ky) = (lvl.w as f32 / lw, lvl.h as f32 / lh);
+    let mut out = vec![0.0f32; w * h * 4];
+    out.par_chunks_mut(4 * w).zip(cover.a.par_chunks_mut(w)).enumerate().for_each(|(row, (dest, arow))| {
+        let py = origin.1 as f32 + row as f32 + 0.5;
+        for (col, (p, a)) in dest.as_chunks_mut::<4>().0.iter_mut().zip(arow.iter_mut()).enumerate() {
+            let (lx, ly) = apply(inv, origin.0 as f32 + col as f32 + 0.5, py);
+            let c = lvl.sample_bilinear((lx - lb[0]) * kx, (ly - lb[1]) * ky);
+            *p = c;
+            *a = c[3];
+        }
+    });
+    out
 }
 
 fn invert_xform(m: &Xform) -> Option<Xform> {
@@ -390,7 +446,11 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
             }
             Some(l)
         }
-        LayerContent::Shape(_) => None,
+        LayerContent::Shape(_) | LayerContent::Image(_) => None,
+    };
+    let pic = match &spec.content {
+        LayerContent::Image(im) => Some(picture(&im.source)?),
+        _ => None,
     };
     let lb = match &text {
         Some(l) => l.bounds,
@@ -447,6 +507,10 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
     if let Some(p) = &shape {
         fill_into(p, &mut cover, -x0 as f32, -y0 as f32);
     }
+    let pic_px = match &pic {
+        Some(pic) => Some(sample_picture(pic, lb, &invert_xform(m)?, s, (x0, y0), &mut cover)),
+        None => None,
+    };
     let stroke_cover = StrokeCoverage { cover: &cover, text: text.as_deref(), transform: m, origin: (x0, y0), scale: s, filled: ap.fill.is_some() };
     let strokes: Vec<_> = ap.strokes.iter().map(|stroke| stroke_cover.prepare(stroke)).collect();
     let outer = |k: u32| k != 1 && k != 2;
@@ -483,7 +547,12 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
         LayerContent::Text(t) => t.runs.iter().map(|(_, s)| s.fill).collect(),
         _ => Vec::new(),
     };
-    if let Some(grad) = &ap.gradient
+    // an image layer's fill is the picture itself
+    if let Some(pp) = &pic_px {
+        if ap.fill.is_some() {
+            over_pixels(&mut px, pp);
+        }
+    } else if let Some(grad) = &ap.gradient
         && let Some(inv) = invert_xform(m)
     {
         if run_fills.iter().any(Option::is_some)
@@ -527,6 +596,9 @@ fn raster_cache() -> &'static Cache {
 pub fn raster_layer_cached(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option<Arc<LayerRaster>> {
     let mut hs = std::collections::hash_map::DefaultHasher::new();
     format!("{spec:?}").hash(&mut hs);
+    if let LayerContent::Image(im) = &spec.content {
+        picture(&im.source).map(|p| p.id).hash(&mut hs);
+    }
     m.iter().for_each(|v| v.to_bits().hash(&mut hs));
     (cw, ch).hash(&mut hs);
     let key = hs.finish();
@@ -584,15 +656,20 @@ pub fn layer_bounds(spec: &LayerSpec) -> [f64; 4] {
     b
 }
 
-/// Resolve responsive pins of evaluated layers in place: pinned layers move, shapes pinned on
-/// opposite edges resize.
+/// Resolve responsive pins of evaluated layers in place: pinned layers move, shapes and images
+/// pinned on opposite edges resize.
 pub fn apply_pins(specs: &mut [LayerSpec], canvas: (u32, u32)) {
     if !specs.iter().any(|s| s.pin.is_some()) {
         return;
     }
     let nodes: Vec<PinNode> = specs
         .iter()
-        .map(|s| PinNode { uid: s.uid, pin: s.pin.clone(), bounds: layer_bounds(s), resizable: matches!(s.content, LayerContent::Shape(_)) })
+        .map(|s| PinNode {
+            uid: s.uid,
+            pin: s.pin.clone(),
+            bounds: layer_bounds(s),
+            resizable: matches!(s.content, LayerContent::Shape(_) | LayerContent::Image(_)),
+        })
         .collect();
     let out = resolve_pins(&nodes, [0.0, 0.0, canvas.0 as f64, canvas.1 as f64]);
     for ((s, n), b) in specs.iter_mut().zip(&nodes).zip(out) {
@@ -601,12 +678,19 @@ pub fn apply_pins(specs: &mut [LayerSpec], canvas: (u32, u32)) {
         }
         let (ow, oh) = (n.bounds[2] - n.bounds[0], n.bounds[3] - n.bounds[1]);
         let (nw, nh) = (b[2] - b[0], b[3] - b[1]);
-        if let LayerContent::Shape(sh) = &mut s.content {
-            let kx = if ow > 1e-9 { nw / ow } else { 1.0 };
-            let ky = if oh > 1e-9 { nh / oh } else { 1.0 };
-            if (kx - 1.0).abs() > 1e-12 || (ky - 1.0).abs() > 1e-12 {
-                sh.size = ((sh.size.0 as f64 * kx) as f32, (sh.size.1 as f64 * ky) as f32);
-                sh.points.iter_mut().for_each(|p| *p = [(p[0] as f64 * kx) as f32, (p[1] as f64 * ky) as f32]);
+        let kx = if ow > 1e-9 { nw / ow } else { 1.0 };
+        let ky = if oh > 1e-9 { nh / oh } else { 1.0 };
+        if (kx - 1.0).abs() > 1e-12 || (ky - 1.0).abs() > 1e-12 {
+            match &mut s.content {
+                LayerContent::Shape(sh) => {
+                    sh.size = ((sh.size.0 as f64 * kx) as f32, (sh.size.1 as f64 * ky) as f32);
+                    sh.points.iter_mut().for_each(|p| *p = [(p[0] as f64 * kx) as f32, (p[1] as f64 * ky) as f32]);
+                }
+                LayerContent::Image(im) => {
+                    let (w, h) = image_size(im);
+                    im.size = ((w as f64 * kx) as f32, (h as f64 * ky) as f32);
+                }
+                LayerContent::Text(_) => {}
             }
         }
         let now = layer_bounds(s);

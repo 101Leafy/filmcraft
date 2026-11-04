@@ -488,3 +488,33 @@ fn responsive_time_remaps_layer_keyframes_not_the_clips_own_effects() {
     assert!((own_at(&item, 2.5) - 0.5).abs() < 1e-4, "media 4.5 s: {}", own_at(&item, 2.5));
     assert!((own_at(&item, 0.0) - 1.0).abs() < 1e-4, "media 2 s: {}", own_at(&item, 0.0));
 }
+
+#[test]
+fn image_layer_draws_its_picture_at_size() {
+    use filmcraft_project::graphic::new_image_layer;
+    // 8×4: left half red, right half blue
+    let mut px = Vec::new();
+    for _ in 0..4 {
+        for x in 0..8 {
+            px.extend(if x < 4 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+        }
+    }
+    let mut png = Vec::new();
+    image::RgbaImage::from_raw(8, 4, px).unwrap().write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    assert!(crate::graphic_image::register_image_data("embedded:test-halves", &png));
+    assert!(!crate::graphic_image::register_image_data("embedded:test-junk", b"not a picture"));
+
+    let mut e = new_image_layer("embedded:test-halves", Vec2::new(100.0, 50.0));
+    // one side set: the other follows the picture's aspect
+    set(&mut e, "size", ParamValue::Vec2(Vec2::new(80.0, 0.0)));
+    let mut img = Image::new(200, 100);
+    render_graphic_layers(&[e.clone()], Tick::ZERO, (200, 100), &Affine::IDENTITY, &mut img);
+    assert_eq!(ink_box(&img), Some([60, 30, 139, 69]));
+    assert!(img.get(80, 50)[0] > 0.9 && img.get(80, 50)[2] < 0.1);
+    assert!(img.get(120, 50)[2] > 0.9 && img.get(120, 50)[0] < 0.1);
+
+    set(&mut e, "source", ParamValue::Text("embedded:test-missing".into()));
+    let mut none = Image::new(200, 100);
+    render_graphic_layers(&[e], Tick::ZERO, (200, 100), &Affine::IDENTITY, &mut none);
+    assert_eq!(ink_box(&none), None);
+}

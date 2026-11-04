@@ -18,6 +18,7 @@ pub mod effects;
 pub mod flow;
 pub mod gpufx;
 pub mod graphic_clip;
+pub mod graphic_image;
 pub mod graphics;
 pub mod image;
 pub mod lumetri_cube;

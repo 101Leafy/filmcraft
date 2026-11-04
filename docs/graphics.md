@@ -1,7 +1,7 @@
 # Graphics
 
 FilmCraft's graphics work like Premiere's Essential Graphics: a **graphic clip** on a video track
-holds **text** and **shape** layers. Text is set by the text engine in `crates/text`
+holds **text**, **shape**, and **image** layers. Text is set by the text engine in `crates/text`
 ([README](../crates/text/README.md)): bundled OFL fonts plus system fonts, OpenType shaping with
 kerning and ligatures, bidi, line breaking, all drawn as vectors in linear light.
 
@@ -10,7 +10,7 @@ kerning and ligatures, bidi, line breaking, all drawn as vectors in linear light
 - A graphic clip's project item is an `ItemKind::Graphic { width, height, rate }`: a transparent
   canvas the size of the sequence frame, with unlimited duration. These items are internal and do
   not appear in the Project panel.
-- Its **layers** are effect instances `graphic_text` / `graphic_shape` in the clip's effect list,
+- Its **layers** are effect instances `graphic_text` / `graphic_shape` / `graphic_image` in the clip's effect list,
   in paint order (first = back). They are hidden from the Effects panel. Because they are effect
   instances they save with the project, take keyframes on every animatable property (Source Text
   keyframes hold), appear in Effect Controls and copy with the clip. The Essential Graphics
@@ -103,7 +103,8 @@ Timecode and Clip Name effects also draw with the text engine.
 | `graphics.newText` | Graphics and Titles ▸ New Layer ▸ Text (⌘T) | `text`, `position`, `box` (`[w, h]`: paragraph text in a box, `position` is its top-left corner), `clip` (add to this graphic), `vertical`, `size`, `font`, `fontStyle`, `seconds` (5), `track`, `time` |
 | `graphics.newVerticalText` | New Layer ▸ Vertical Text | as `graphics.newText`; characters stack top to bottom, paragraphs are columns right to left |
 | `graphics.newRectangle`, `graphics.newEllipse`, `graphics.newPolygon` | New Layer ▸ Rectangle (⌥⌘R), Ellipse (⌥⌘E), Polygon | `position` (the shape's centre), `size`, `clip`, `seconds` (5), `track`, `time`; polygon `sides` (6) |
-| `graphics.newFromFile` | New Layer ▸ From file… | `path` — imports the image or video and places it above the clips at the playhead (a separate clip; graphics have no media layers yet) |
+| `graphics.newFromFile` | New Layer ▸ From file… | `path` — imports the image or video and places it above the clips at the playhead (a separate clip; `graphics.newImage` puts a picture inside a graphic) |
+| `graphics.newImage` | (agents) | `path` (a picture file), `position` (its centre), `size` (default: the picture's own size; 0 on one side keeps the aspect), `clip` (add to this graphic), `seconds` (5), `track`, `time` |
 | `graphics.newShape` | (agents) | `shape` (rectangle/ellipse/polygon/path), `position` (the shape's centre), `size`, `points`, `clip` (add to this graphic), `seconds` (5), `track`, `time` |
 | `graphics.setTextType` | Text Properties ▸ Text Layer Type | `clip`, `layer`, `type` (`point` / `paragraph`); the text stays where it is |
 | `graphics.setText` | typing on the monitor | `clip`, `layer`, `text`, `merge` (coalesce one typing session into one undo step) |
@@ -247,7 +248,7 @@ engine at runtime.
 |---|---|---|
 | `graphics.template.list` | (query) | `query`, `category`, `source` (builtin / user) |
 | `graphics.template.apply` | Browse tab: drag or double-click | `template` (id, name or `.fcgt` path), `values` {control: value}, `time`, `track` |
-| `graphics.template.export` | Graphics and Titles ▸ Export As Motion Graphics Template… | `clip`, `name`, `category`, `description`, `controls` [{`layer`, `param`, `name`, `kind`, `min`, `max`}], `path` (default: the user folder), `embedFonts` |
+| `graphics.template.export` | Graphics and Titles ▸ Export As Motion Graphics Template… | `clip`, `name`, `category`, `description`, `controls` [{`layer`, `param`, `name`, `kind`, `min`, `max`}], `path` (default: the user folder), `embedFonts`, `embedImages` (default on) |
 | `file.exportGraphicsTemplate` | File ▸ Export ▸ Motion Graphics Template… | as above |
 | `graphics.template.install` | Graphics and Titles ▸ Install Motion Graphics Template… | `path` (a `.fcgt`) |
 | `graphics.template.remove` | Browse tab | `template` (user templates) |
@@ -255,6 +256,16 @@ engine at runtime.
 | `graphics.template.thumbnail` | (query) | `template`, `width`, `path` (PNG) |
 
 User templates live in `<data dir>/Graphics Templates/`.
+
+**Image layers** show a still picture (PNG, JPEG, GIF, WebP, TIFF, BMP) at its own size or at
+`size`, with the layer's transform, opacity, and drop shadow. Pictures are decoded once into
+linear light with mipmaps and decoded again when the file changes; a missing file draws nothing.
+Export embeds each picture in the template (`resources.images`, base64) and the layer's `source`
+becomes `embedded:<id>`, so a template carries its art. Applying the template saves the pictures
+to `<data dir>/Graphics Templates/Images/` (one file per picture content) and points the layers
+there, so a saved project keeps them; without a data directory they are kept in memory for the
+session. A `source` control (kind `image`) lets a template's user swap the picture for another
+file path.
 
 **Essential Graphics panel.** *Browse* lists the built-in and user templates as cards with
 engine-rendered thumbnails, a search field and a category filter; click selects, double-click or
@@ -293,5 +304,6 @@ solid fill colour.
 
 ## Not yet
 
-Mask-with-text, per-layer blend modes, Bézier curves in the pen tool (paths are polygons), media
-layers inside graphics, and template controls grouped into folders.
+Mask-with-text, per-layer blend modes, Bézier curves in the pen tool (paths are polygons), video
+layers inside graphics, a file picker for image controls (they take a path), and template controls
+grouped into folders.

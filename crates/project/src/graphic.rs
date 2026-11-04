@@ -1,8 +1,9 @@
-//! Graphic clips: text and shape layers.
+//! Graphic clips: text, shape, and image layers.
 //!
 //! A graphic clip is a track item whose project item is an [`ItemKind::Graphic`](crate::ItemKind)
 //! source (a transparent canvas the size of the sequence frame). Its **layers** are effect
-//! instances of the hidden effects [`TEXT_LAYER`] and [`SHAPE_LAYER`] in the clip's effect list,
+//! instances of the hidden effects [`TEXT_LAYER`], [`SHAPE_LAYER`], and [`IMAGE_LAYER`] in the clip's
+//! effect list,
 //! in paint order (first = back). Being effect instances, layers serialize with the project, get
 //! keyframes for every animatable property (Source Text holds), show in Effect Controls, and copy
 //! with the clip — like Premiere's Text / Shape components. Standard effects on the clip apply to
@@ -19,6 +20,11 @@ use crate::keyframe::{Param, ParamValue};
 
 pub const TEXT_LAYER: &str = "graphic_text";
 pub const SHAPE_LAYER: &str = "graphic_shape";
+pub const IMAGE_LAYER: &str = "graphic_image";
+
+/// Prefix of an image layer `source` that names a picture embedded in a graphics template
+/// (`embedded:<id>`) instead of a file.
+pub const EMBEDDED_PREFIX: &str = "embedded:";
 
 pub const ALIGN_OPTS: &[&str] = &["Left", "Center", "Right", "Justify"];
 pub const CAPS_OPTS: &[&str] = &["Normal", "All Caps", "Small Caps"];
@@ -28,7 +34,7 @@ pub const FILL_KIND_OPTS: &[&str] = &["Solid", "Linear Gradient"];
 
 /// Whether an effect instance is a graphic layer.
 pub fn is_layer_id(id: &str) -> bool {
-    id == TEXT_LAYER || id == SHAPE_LAYER
+    id == TEXT_LAYER || id == SHAPE_LAYER || id == IMAGE_LAYER
 }
 
 pub fn is_layer(e: &EffectInstance) -> bool {
@@ -146,10 +152,11 @@ fn layer_def(id: &'static str, name: &'static str, mut params: Vec<ParamDef>) ->
     EffectDef { id, name, kind: EffectKind::Video, category: &[], params, intrinsic: false, accelerated: true, float32: true, yuv: false }
 }
 
-/// Definitions of the two layer kinds (appended to the effect registry; not in the Effects panel).
+/// Definitions of the layer kinds (appended to the effect registry; not in the Effects panel).
 pub(crate) fn layer_defs() -> Vec<EffectDef> {
     const X: &str = "Text";
     const S: &str = "Shape";
+    const I: &str = "Image";
     vec![
         layer_def(
             TEXT_LAYER,
@@ -186,6 +193,15 @@ pub(crate) fn layer_defs() -> Vec<EffectDef> {
                 fl("sides", "Polygon Sides", 6.0, (3.0, 64.0), (3.0, 16.0), "", S),
                 fl("corner_radius", "Corner Radius", 0.0, (0.0, 10_000.0), (0.0, 200.0), "", S),
                 p("points", "Path Points", ParamKind::Curve { hue: false }, ParamValue::Curve(vec![]), false, S),
+            ],
+        ),
+        layer_def(
+            IMAGE_LAYER,
+            "Image",
+            vec![
+                tx("name", "Layer Name", "", false, ""),
+                tx("source", "Source", "", false, I),
+                p("size", "Size", ParamKind::Point, ParamValue::Vec2(Vec2::new(0.0, 0.0)), true, I),
             ],
         ),
     ]
@@ -309,9 +325,19 @@ pub struct ShapeProps {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ImageProps {
+    /// A file path, or `embedded:<id>` for a picture carried in a graphics template.
+    pub source: String,
+    /// Drawn size in layer pixels. 0 means the picture's own size; with one axis set, the other
+    /// follows the picture's aspect.
+    pub size: (f32, f32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum LayerContent {
     Text(TextProps),
     Shape(ShapeProps),
+    Image(ImageProps),
 }
 
 /// A layer evaluated at one time.
@@ -398,6 +424,10 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
                 points: val(e, "points", t).as_curve().map(<[_]>::to_vec).unwrap_or_default(),
             })
         }
+        IMAGE_LAYER => {
+            let sz = vv(e, "size", t);
+            LayerContent::Image(ImageProps { source: ss(e, "source", t), size: (sz.x.max(0.0) as f32, sz.y.max(0.0) as f32) })
+        }
         _ => return None,
     };
     let mut strokes = Vec::new();
@@ -405,7 +435,7 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
         let style = StrokeStyle { enabled: bb(e, on, t), color: cc(e, c, t), width: ff(e, w, t).clamp(0.0, 1000.0), kind: ch(e, k, t) };
         let runs: Vec<_> = match &content {
             LayerContent::Text(text) => text.runs.iter().map(|(_, s)| style.with_char_style(s, on == "stroke2")).collect(),
-            LayerContent::Shape(_) => Vec::new(),
+            LayerContent::Shape(_) | LayerContent::Image(_) => Vec::new(),
         };
         if style.active() || runs.iter().any(StrokeStyle::active) {
             strokes.push(Stroke { style, runs });
@@ -507,7 +537,7 @@ pub fn new_vertical_text_layer(text: &str, position: Vec2, size: f64) -> EffectI
 /// Reset a layer's parameters to their defaults, keeping its content (name, text, shape kind,
 /// geometry and path) — Graphics ▸ Reset All Parameters.
 pub fn reset_layer_params(e: &mut EffectInstance) {
-    const KEEP: &[&str] = &["name", "text", "shape", "size", "sides", "points", "vertical", "box_width", "box_height"];
+    const KEEP: &[&str] = &["name", "text", "shape", "source", "size", "sides", "points", "vertical", "box_width", "box_height"];
     let Some(def) = crate::effect::find_effect(&e.effect) else { return };
     let mut fresh = def.instance();
     for k in KEEP {
@@ -530,7 +560,17 @@ pub fn new_shape_layer(shape: u32, position: Vec2, size: Vec2, points: Vec<[f32;
     e
 }
 
-/// Display name of a layer: its name, else the text (first line), else "Shape 01"-style.
+/// A new image layer showing `source` (a file path or `embedded:<id>`) at its own size, centred
+/// at `position`.
+pub fn new_image_layer(source: &str, position: Vec2) -> EffectInstance {
+    let mut e = layer_instance(IMAGE_LAYER);
+    set(&mut e, "source", ParamValue::Text(source.to_string()));
+    set(&mut e, "position", ParamValue::Vec2(position));
+    e
+}
+
+/// Display name of a layer: its name, else the text (first line), else the image's file name,
+/// else "Shape 01"-style.
 pub fn layer_display_name(e: &EffectInstance, index: usize) -> String {
     let name = ss(e, "name", Tick::ZERO);
     if !name.is_empty() {
@@ -540,6 +580,11 @@ pub fn layer_display_name(e: &EffectInstance, index: usize) -> String {
         let t = ss(e, "text", Tick::ZERO);
         let first = t.lines().next().unwrap_or("").trim().to_string();
         if first.is_empty() { "Text".into() } else { first.chars().take(40).collect() }
+    } else if e.effect == IMAGE_LAYER {
+        let src = ss(e, "source", Tick::ZERO);
+        let stem = src.strip_prefix(EMBEDDED_PREFIX).unwrap_or(&src).rsplit(['/', '\\']).next().unwrap_or("").to_string();
+        let stem = stem.rsplit_once('.').map_or(stem.as_str(), |(a, _)| a).trim().to_string();
+        if stem.is_empty() { format!("Image {:02}", index + 1) } else { stem.chars().take(40).collect() }
     } else {
         format!("Shape {:02}", index + 1)
     }

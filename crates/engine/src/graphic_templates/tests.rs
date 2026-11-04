@@ -705,3 +705,34 @@ fn gradient_stop_keeps_its_alpha() {
     assert!((start[3] - 128.0 / 255.0).abs() < 1e-3, "{start:?}");
     assert_eq!(col("gradient_end").unwrap()[3], 1.0);
 }
+
+#[test]
+fn image_layers_travel_inside_templates() {
+    use filmcraft_project::gtemplate::{ControlKind, GraphicsTemplate};
+    let mut s = demo("gt-image");
+    let png = tmp_dir("gt-image-src").join("talk box.png");
+    image::save_buffer(&png, &[255, 0, 0, 255].repeat(16), 4, 4, image::ExtendedColorType::Rgba8).unwrap();
+    let path = png.to_string_lossy().to_string();
+    assert!(s.execute("graphics.newImage", json!({"path": png.with_extension("gif").to_string_lossy()})).is_err());
+    let c = clip_of(&s.execute("graphics.newImage", json!({"path": path, "size": [400, 400]})).unwrap());
+    let ex = s
+        .execute("graphics.template.export", json!({"clip": c.0, "name": "Talk Box", "controls": [{"layer": 0, "param": "source", "name": "Picture"}]}))
+        .unwrap();
+    assert_eq!(ex["images"], 1);
+    let t = GraphicsTemplate::from_bytes(&std::fs::read(ex["path"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(t.resources.images[0].id, "talk-box");
+    assert_eq!(t.layers[0].params["source"].value, ParamValue::Text("embedded:talk-box".into()));
+    assert_eq!(t.controls[0].kind, ControlKind::Image);
+    // the template carries the picture: the file is no longer needed
+    std::fs::remove_file(&png).unwrap();
+    let (w, h, px) = super::thumbnail(&t, 64);
+    let mid = ((h / 2 * w + w / 2) * 4) as usize;
+    assert_eq!(&px[mid..mid + 4], &[255, 0, 0, 255]);
+    let a = clip_of(&s.execute("graphics.template.apply", json!({"template": t.id})).unwrap());
+    let it = item(&s, a);
+    let specs = item_layer_specs(&it, it.source_in, canvas(&s));
+    let LayerContent::Image(im) = &specs[0].1.content else { panic!("not an image layer") };
+    assert!(std::path::Path::new(&im.source).is_file(), "applied pictures are saved with the templates: {}", im.source);
+    let b = layer_bounds(&specs[0].1);
+    assert_eq!((b[2] - b[0]).round(), 400.0);
+}
