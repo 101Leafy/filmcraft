@@ -181,6 +181,7 @@ pub(crate) fn layer_defs() -> Vec<EffectDef> {
                 fl("box_width", "Text Box Width", 0.0, (0.0, 100_000.0), (0.0, 3840.0), "", X),
                 fl("box_height", "Text Box Height", 0.0, (0.0, 100_000.0), (0.0, 2160.0), "", X),
                 bo("vertical", "Vertical Text", false, X),
+                fl("type_on", "Type On", 100.0, (0.0, 100.0), (0.0, 100.0), "%", X),
             ],
         ),
         layer_def(
@@ -309,6 +310,8 @@ pub struct TextProps {
     pub box_height: f32,
     /// Vertical text (characters stacked top to bottom; columns right to left).
     pub vertical: bool,
+    /// Percent of the characters drawn, from the start (100 = all). Animating it types the text on.
+    pub type_on: f32,
     /// Per-character style overrides as *byte* ranges of `text` (sorted, non-overlapping).
     pub runs: Vec<(std::ops::Range<usize>, crate::graphic_design::CharStyle)>,
 }
@@ -412,6 +415,7 @@ pub fn eval_layer(e: &EffectInstance, t: Tick, frame: (u32, u32)) -> Option<Laye
                 box_width: ff(e, "box_width", t).max(0.0),
                 box_height: ff(e, "box_height", t).max(0.0),
                 vertical: bb(e, "vertical", t),
+                type_on: ff(e, "type_on", t).clamp(0.0, 100.0),
             }
         }),
         SHAPE_LAYER => {

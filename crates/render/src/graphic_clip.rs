@@ -107,6 +107,19 @@ pub fn text_layout(t: &TextProps) -> Arc<Layout> {
     layout_rich(&t.text, &st, &runs, &ps)
 }
 
+/// Drops the glyphs past `type_on` percent of the characters. Bounds stay those of the whole text,
+/// so a line being typed does not move.
+fn typed(l: Arc<Layout>, t: &TextProps) -> Arc<Layout> {
+    if t.type_on >= 100.0 {
+        return l;
+    }
+    let n = (t.text.chars().count() as f32 * t.type_on / 100.0) as usize;
+    let cut = t.text.char_indices().nth(n).map_or(t.text.len(), |(i, _)| i);
+    let mut l = (*l).clone();
+    l.glyphs.retain(|g| g.cluster < cut);
+    Arc::new(l)
+}
+
 /// A shape layer's outline in layer pixels (centred on the layer origin).
 pub fn shape_path(s: &ShapeProps) -> filmcraft_text::Path {
     let (w, h) = (s.size.0 / 2.0, s.size.1 / 2.0);
@@ -440,7 +453,7 @@ pub fn raster_layer(spec: &LayerSpec, m: &Xform, cw: usize, ch: usize) -> Option
     let ap = &spec.appearance;
     let text = match &spec.content {
         LayerContent::Text(t) => {
-            let l = text_layout(t);
+            let l = typed(text_layout(t), t);
             if l.glyphs.is_empty() && l.underlines.is_empty() && ap.background.is_none() {
                 return None;
             }

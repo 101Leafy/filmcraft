@@ -231,6 +231,7 @@ mod ime_byte_delete_tests {
             box_width: 0.0,
             box_height: 0.0,
             vertical: false,
+            type_on: 100.0,
             runs: Vec::new(),
         };
         let view = super::LayerView {

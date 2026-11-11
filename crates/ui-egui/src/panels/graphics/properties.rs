@@ -709,6 +709,7 @@ pub fn properties(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             cx.number(ui, tl!("Tracking"), NumberField { id: "tracking", speed: 1.0, range: (-1000.0, 10_000.0), decimals: 0, unit: "" });
             cx.number(ui, tl!("Leading"), NumberField { id: "leading", speed: 0.5, range: (-5000.0, 5000.0), decimals: 0, unit: "" });
             cx.number(ui, tl!("Baseline Shift"), NumberField { id: "baseline_shift", speed: 0.5, range: (-5000.0, 5000.0), decimals: 0, unit: "" });
+            cx.number(ui, tl!("Type On"), NumberField { id: "type_on", speed: 0.5, range: (0.0, 100.0), decimals: 1, unit: "%" });
             let vertical = pv(e, "vertical", mt).as_bool().unwrap_or(false);
             let (_, mut vui) = cx.row(ui, tl!("Orientation"));
             let mut value = vertical;

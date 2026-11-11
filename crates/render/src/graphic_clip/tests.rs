@@ -518,3 +518,24 @@ fn image_layer_draws_its_picture_at_size() {
     render_graphic_layers(&[e], Tick::ZERO, (200, 100), &Affine::IDENTITY, &mut none);
     assert_eq!(ink_box(&none), None);
 }
+
+#[test]
+fn type_on_draws_the_first_characters_only() {
+    let mut e = new_text_layer("AAAA", Vec2::new(20.0, 100.0), 60.0);
+    set(&mut e, "fill_color", ParamValue::Color([1.0, 1.0, 1.0, 1.0]));
+    let lit = |e: &EffectInstance| {
+        let mut img = Image::new(400, 200);
+        render_graphic_layers(std::slice::from_ref(e), Tick::ZERO, (400, 200), &Affine::IDENTITY, &mut img);
+        (0..400).filter(|&x| (0..200).any(|y| img.get(x, y)[3] > 0.5)).max()
+    };
+    let whole = lit(&e).unwrap();
+    set(&mut e, "type_on", ParamValue::Float(50.0));
+    let half = lit(&e).unwrap();
+    let l = text_layout(match &eval_layer(&e, Tick::ZERO, (400, 200)).unwrap().content {
+        LayerContent::Text(t) => t,
+        _ => unreachable!(),
+    });
+    assert!((half as f32) < 20.0 + l.caret(2).0 + 1.0 && whole > half, "half {half}, whole {whole}");
+    set(&mut e, "type_on", ParamValue::Float(0.0));
+    assert_eq!(lit(&e), None);
+}

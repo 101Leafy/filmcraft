@@ -234,6 +234,7 @@ fn param_id(k: &str) -> &str {
         "fauxItalic" => "faux_italic",
         "boxWidth" => "box_width",
         "boxHeight" => "box_height",
+        "typeOn" => "type_on",
         "anchorPoint" => "anchor",
         "cornerRadius" => "corner_radius",
         other => other,
