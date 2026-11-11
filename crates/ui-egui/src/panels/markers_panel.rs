@@ -108,6 +108,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if r.clicked() {
             bulk(app, owner, &state.selected, "markers.delete", None);
         }
+        if matches!(owner, Owner::Sequence(_)) {
+            let ranges =
+                !state.selected.is_empty() && markers.iter().filter(|m| state.selected.contains(&m.id.0)).all(|m| m.duration > filmcraft_time::Tick::ZERO);
+            let r = ui.add_enabled(ranges, egui::Button::new(tl!("Ripple delete")));
+            app.auto.add_response("markers.rippleDeleteSelected", &r, tl!("Ripple delete the ranges of the selected markers on every track"));
+            if r.clicked() {
+                if let Err(e) = app.session.execute("markers.rippleDelete", json!({"markers": state.selected})) {
+                    app.ui.status = e.to_string();
+                }
+                state.selected.clear();
+            }
+        }
         ui.add_enabled_ui(!state.selected.is_empty(), |ui| {
             let menu = ui.menu_button(tl!("Color"), |ui| {
                 for preset in Label::ALL {

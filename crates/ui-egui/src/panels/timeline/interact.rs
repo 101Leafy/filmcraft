@@ -1161,6 +1161,31 @@ fn effect_drop_preview(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
 
 /// Handle Timeline pointer input: remember the grab from the press frame, jump the playhead on a ruler press, select a marker on its press, and reset the
 /// cancel flag once the button is released.
+/// A click on a range marker makes its range In/Out, so Backspace cuts it from every track.
+/// Waits out the double-click time so a double-click only opens the marker.
+fn range_marker_click(app: &mut FilmcraftApp, ctx: &egui::Context, resp: &egui::Response, seq: &Sequence, layout: &Layout) {
+    let pending_id = egui::Id::unique("timeline.markerClick");
+    let now = ctx.input(|i| i.time);
+    if resp.double_clicked() {
+        ctx.data_mut(|d| d.remove::<(u64, f64)>(pending_id));
+    } else if resp.clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+        && let Some(marker) = marker_under_pointer(seq, layout, p).filter(|m| m.duration > Tick::ZERO)
+    {
+        ctx.data_mut(|d| d.insert_temp(pending_id, (marker.id.0, now)));
+        ctx.request_repaint_after(std::time::Duration::from_millis(350));
+    } else if let Some((marker, at)) = ctx.data(|d| d.get_temp::<(u64, f64)>(pending_id)) {
+        if now - at > 0.3 {
+            ctx.data_mut(|d| d.remove::<(u64, f64)>(pending_id));
+            if let Err(e) = app.session.execute("markers.selectRange", json!({"marker": marker})) {
+                app.ui.status = e.to_string();
+            }
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
 pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &Layout, rect: Rect) {
     let ctx = ui.ctx().clone();
     let area = Rect::from_min_max(pos2(layout.content.min.x, layout.ruler.min.y), layout.content.max);
@@ -1213,6 +1238,8 @@ pub(super) fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence
     } else {
         false
     };
+
+    range_marker_click(app, &ctx, &resp, seq, layout);
 
     // ---- double-click the work area bar: it spans the part of the sequence the ruler shows
     if resp.double_clicked()

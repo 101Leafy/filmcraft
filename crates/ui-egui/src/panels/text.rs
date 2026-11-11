@@ -643,6 +643,10 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let paras = &content.paragraphs;
     let rate = app.session.sequence_rate();
     let df = app.session.active_sequence().is_some_and(|q| q.settings.drop_frame);
+    let drag_id = egui::Id::unique("transcript-drag");
+    let dragging: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+    let pointer = ui.input(|i| i.pointer.interact_pos());
+    let released = ui.input(|i| i.pointer.any_released());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(6.0)).id_salt("transcript-list"));
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("transcript-scroll").show(&mut child, |ui| {
         ui.set_width(list.width() - 16.0);
@@ -663,8 +667,18 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     } else if hit {
                         text = text.background_color(t.hover);
                     }
-                    let resp = ui.add(egui::Label::new(text).sense(Sense::click()));
+                    // not selectable as text: a drag across words selects the words, which marks In/Out
+                    let resp = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click_and_drag()));
                     app.auto.add(&format!("text.transcript.word.{i}"), resp.rect, &w.text);
+                    if resp.drag_started() {
+                        ui.data_mut(|d| d.insert_temp(drag_id, i));
+                        app.ui.transcript_sel = Some((i, i));
+                    }
+                    if let Some(a) = dragging
+                        && pointer.is_some_and(|p| resp.rect.expand2(vec2(2.0, 1.5)).contains(p))
+                    {
+                        app.ui.transcript_sel = Some((a, i));
+                    }
                     if resp.clicked() {
                         let shift = ui.input(|inp| inp.modifiers.shift);
                         app.ui.transcript_sel = Some(match (shift, sel) {
@@ -679,6 +693,12 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.add_space(8.0);
         }
     });
+    if dragging.is_some() && released {
+        ui.data_mut(|d| d.remove::<usize>(drag_id));
+        if let Some((a, b)) = app.ui.transcript_sel {
+            actions.push(("transcript.select".into(), json!({"from": a.min(b), "to": a.max(b)})));
+        }
+    }
     run(app, ui, actions);
 }
 

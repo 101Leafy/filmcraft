@@ -17,6 +17,29 @@ pub(super) fn marker_menu(app: &mut FilmcraftApp, ctx: &egui::Context, ui: &mut 
         ui.close();
     }
     crate::panels::misc::marker_label_menu(app, ui, &marker, "timeline.markerMenu");
+    if marker.duration > filmcraft_time::Tick::ZERO {
+        ui.separator();
+        let same_color = match marker.custom_color {
+            Some(c) => json!({"color": c.hex()}),
+            None => json!({"color": marker.color.name()}),
+        };
+        let items = [
+            ("Mark Marker Range", "markers.selectRange", json!({"marker": marker.id.0})),
+            ("Ripple Delete Marker Range", "markers.rippleDelete", json!({"marker": marker.id.0})),
+            ("Ripple Delete All Ranges of This Color", "markers.rippleDelete", same_color),
+        ];
+        for (i, (label, cmd, params)) in items.into_iter().enumerate() {
+            let label = crate::i18n::t(label);
+            let r = ui.button(label);
+            app.auto.add(&format!("timeline.markerMenu.{cmd}.{i}"), r.rect, label);
+            if r.clicked() {
+                if let Err(e) = app.session.execute(cmd, params) {
+                    app.ui.status = e.to_string();
+                }
+                ui.close();
+            }
+        }
+    }
     ui.separator();
     for (label, cmd) in [("Clear Selected Marker", "markers.clearCurrent"), ("Clear Markers", "markers.clearAll")] {
         let label = crate::i18n::t(label);

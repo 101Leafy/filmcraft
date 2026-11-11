@@ -192,6 +192,23 @@ impl FilmcraftApp {
                 }
                 continue;
             }
+            // Nothing selected and an In or Out point marked (a transcript or marker range): Clear
+            // and Ripple Delete cut that range out of every track.
+            let st = &self.session.state;
+            if self.ui.focused == PanelKind::Timeline
+                && matches!(id.as_str(), "edit.clear" | "edit.rippleDelete")
+                && st.selection.is_empty()
+                && st.caption_selection.is_empty()
+                && st.transition_selection.is_empty()
+                && st.gap_selection.is_none()
+                && self.session.active_sequence().is_some_and(|q| q.mark_in.is_some() || q.mark_out.is_some())
+            {
+                if let Err(e) = menus::invoke(self, ctx, "sequence.rippleDeleteInOut", json!({})) {
+                    self.ui.status = e;
+                }
+                self.ui.transcript_sel = None;
+                continue;
+            }
             // Mark In/Out in the Source monitor when it has focus.
             let params = if let Some(p) = clear {
                 p

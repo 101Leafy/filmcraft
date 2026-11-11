@@ -1,7 +1,7 @@
 # Transcripts and text-based editing
 
 FilmCraft's Text panel ▸ **Transcript** tab shows the dialogue of the open sequence as text. Select
-words to mark In/Out, then extract or lift them; remove filler words and long pauses in one step;
+words (click, Shift+click or drag) to mark In/Out, then ripple delete, extract or lift them; remove filler words and long pauses in one step;
 turn the transcript into captions. Every action is an engine command (`transcript.*`), so the CLI,
 the control channel and MCP agents can do the same.
 
@@ -29,6 +29,10 @@ the control channel and MCP agents can do the same.
 | `transcript.search` | Word-index ranges matching a phrase (case and punctuation ignored; the last word may be a prefix). |
 | `transcript.select` | Mark In/Out around words `from..=to` (frame-snapped outward) and move the playhead there. |
 | `transcript.extract` / `transcript.lift` | Extract (ripple) or lift the words' frames on the targeted tracks. |
+| `transcript.rippleDelete` | Ripple-delete the words' frames on every unlocked track, targeted or not, with the markers after them. The Text panel's Backspace and Shift+Delete. |
+| `sequence.rippleDeleteInOut` | Ripple-delete In to Out on every unlocked track. Backspace or Shift+Delete in the Timeline when In/Out is set and nothing is selected. |
+| `markers.selectRange` | Mark In/Out on a range marker (`marker`). A click on a range marker in the Timeline does the same. |
+| `markers.rippleDelete` | Ripple-delete the ranges of `marker`, `markers`, or every range marker matching `author` and/or `color` (label or hex), on every unlocked track. The markers go with their ranges and later markers shift with the cut. |
 | `transcript.renameSpeaker` | Rename a speaker by name (every transcript) or by index in one `item`. |
 | `transcript.removeFillers` | Ripple-delete filler words (`fillers`, default um/uh/erm/…; phrases such as "you know" allowed). |
 | `transcript.removePauses` | Ripple-delete pauses longer than `minSeconds`, keeping `keepSeconds` of air on both sides. |

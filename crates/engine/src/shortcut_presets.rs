@@ -18,6 +18,7 @@ pub const FILMCRAFT_PANEL: &[Entry] = &[
     ("edit.undo", "Left", "History"),
     ("edit.redo", "Right", "History"),
     ("sequence.close", "Cmd+W", "Timeline"),
+    ("textPanel.rippleDelete", "Shift+Delete", "Text"),
 ];
 
 /// Premiere Pro's default keyboard (macOS) mapped onto FilmCraft commands. FilmCraft Default takes

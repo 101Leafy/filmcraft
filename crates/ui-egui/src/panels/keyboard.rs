@@ -543,7 +543,8 @@ fn text_panel(app: &mut FilmcraftApp, op: &str) -> Result<Value, String> {
         "selectToSegmentEnd" => (paras[para_of(cur)].end - 1, true),
         "delete" | "rippleDelete" => {
             let Some((a, b)) = app.ui.transcript_sel else { return Err("select text in the transcript".into()) };
-            let cmd = if op == "delete" { "transcript.lift" } else { "transcript.extract" };
+            // Ripple Delete closes the gap on every unlocked track, as Premiere's text-based editing does
+            let cmd = if op == "delete" { "transcript.lift" } else { "transcript.rippleDelete" };
             let r = app.session.execute(cmd, json!({"from": a.min(b), "to": a.max(b)})).map_err(|e| e.to_string())?;
             app.ui.transcript_sel = None;
             return Ok(r);
